@@ -1,0 +1,56 @@
+name: Deploy external JAR/WAR
+
+on:
+  workflow_dispatch:
+    inputs:
+      artifact_url:
+        description: "Download URL of the JAR or WAR file"
+        required: true
+        type: string
+      artifact_type:
+        description: "Artifact type"
+        required: true
+        type: choice
+        options:
+          - jar
+          - war
+      deploy_target:
+        description: "Deployment target"
+        required: true
+        type: choice
+        options:
+          - systemd-jar
+          - tomcat-war
+
+jobs:
+  deploy:
+    name: Deploy supplied artifact
+    runs-on: ubuntu-latest
+    environment: staging
+    steps:
+      - name: Checkout deployment scripts
+        uses: actions/checkout@v4
+
+      - name: Download external artifact
+        run: |
+          mkdir -p incoming
+          curl -L "${{ inputs.artifact_url }}" -o "incoming/application.${{ inputs.artifact_type }}"
+
+      - name: Prepare SSH key
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.STAGING_SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          ssh-keyscan -H "${{ secrets.STAGING_HOST }}" >> ~/.ssh/known_hosts
+
+      - name: Deploy JAR to systemd service
+        if: inputs.deploy_target == 'systemd-jar'
+        run: |
+          scp incoming/application.jar "${{ secrets.STAGING_USER }}@${{ secrets.STAGING_HOST }}:/opt/demo-app/demo-app.jar"
+          ssh "${{ secrets.STAGING_USER }}@${{ secrets.STAGING_HOST }}" "sudo systemctl restart demo-app"
+
+      - name: Deploy WAR to Tomcat
+        if: inputs.deploy_target == 'tomcat-war'
+        run: |
+          scp incoming/application.war "${{ secrets.STAGING_USER }}@${{ secrets.STAGING_HOST }}:/tmp/application.war"
+          ssh "${{ secrets.STAGING_USER }}@${{ secrets.STAGING_HOST }}" "sudo mv /tmp/application.war /opt/tomcat/webapps/application.war && sudo systemctl restart tomcat"

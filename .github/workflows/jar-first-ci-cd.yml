@@ -1,0 +1,144 @@
+name: CI/CD - Existing JAR Artifact
+
+on:
+  workflow_dispatch:
+    inputs:
+      jar_url:
+        description: "Download URL for any runnable Java JAR"
+        required: true
+        type: string
+      app_name:
+        description: "Application/service name on the server"
+        required: true
+        default: "demo-app"
+        type: string
+      run_smoke_test:
+        description: "Start the JAR and call /health"
+        required: true
+        default: true
+        type: boolean
+
+jobs:
+  collect-artifact:
+    name: Collect JAR artifact
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download supplied JAR
+        run: |
+          mkdir -p incoming
+          curl -L "${{ inputs.jar_url }}" -o incoming/application.jar
+
+      - name: Validate JAR file exists
+        run: |
+          test -s incoming/application.jar
+          file incoming/application.jar
+
+      - name: Upload collected JAR
+        uses: actions/upload-artifact@v4
+        with:
+          name: supplied-jar
+          path: incoming/application.jar
+
+  artifact-quality-checks:
+    name: Artifact quality checks
+    runs-on: ubuntu-latest
+    needs: collect-artifact
+    steps:
+      - name: Download collected JAR
+        uses: actions/download-artifact@v4
+        with:
+          name: supplied-jar
+          path: incoming
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Inspect JAR contents
+        run: |
+          mkdir -p reports
+          jar tf incoming/application.jar | tee reports/jar-contents.txt
+
+      - name: Check JAR manifest
+        run: |
+          jar xf incoming/application.jar META-INF/MANIFEST.MF
+          cat META-INF/MANIFEST.MF | tee reports/manifest.txt
+
+      - name: Upload artifact inspection reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: jar-inspection-reports
+          path: reports/
+          if-no-files-found: warn
+
+  smoke-test:
+    name: Smoke test supplied JAR
+    runs-on: ubuntu-latest
+    needs: artifact-quality-checks
+    steps:
+      - name: Download collected JAR
+        uses: actions/download-artifact@v4
+        with:
+          name: supplied-jar
+          path: incoming
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Start JAR in background
+        if: inputs.run_smoke_test == true
+        run: |
+          mkdir -p reports
+          java -jar incoming/application.jar > reports/application.log 2>&1 &
+          echo $! > reports/application.pid
+          sleep 20
+
+      - name: Call health endpoint
+        if: inputs.run_smoke_test == true
+        run: |
+          curl --fail --show-error http://localhost:8080/health | tee reports/health-check.json
+
+      - name: Record skipped smoke test
+        if: inputs.run_smoke_test == false
+        run: |
+          mkdir -p reports
+          echo "Smoke test was skipped by workflow input." | tee reports/smoke-test-skipped.txt
+
+      - name: Upload smoke-test reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: jar-smoke-test-reports
+          path: reports/
+          if-no-files-found: warn
+
+  deploy-staging:
+    name: Deploy existing JAR to staging
+    runs-on: ubuntu-latest
+    needs: smoke-test
+    if: github.ref == 'refs/heads/main'
+    environment: staging
+    steps:
+      - name: Download collected JAR
+        uses: actions/download-artifact@v4
+        with:
+          name: supplied-jar
+          path: incoming
+
+      - name: Prepare SSH key
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.STAGING_SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          ssh-keyscan -H "${{ secrets.STAGING_HOST }}" >> ~/.ssh/known_hosts
+
+      - name: Copy JAR and restart service
+        run: |
+          scp incoming/application.jar "${{ secrets.STAGING_USER }}@${{ secrets.STAGING_HOST }}:/opt/${{ inputs.app_name }}/${{ inputs.app_name }}.jar"
+          ssh "${{ secrets.STAGING_USER }}@${{ secrets.STAGING_HOST }}" "sudo systemctl restart ${{ inputs.app_name }}"

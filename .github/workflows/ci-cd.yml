@@ -1,0 +1,164 @@
+name: CI/CD - Normal Java JAR
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  security-events: write
+
+env:
+  JAVA_VERSION: "17"
+  APP_NAME: cicd-pipeline-demo
+
+jobs:
+  validate:
+    name: Validate project
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout source code
+        uses: actions/checkout@v4
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: ${{ env.JAVA_VERSION }}
+          cache: maven
+
+      - name: Validate Maven project
+        run: mvn --batch-mode validate
+
+  test:
+    name: Unit tests and coverage
+    runs-on: ubuntu-latest
+    needs: validate
+    steps:
+      - name: Checkout source code
+        uses: actions/checkout@v4
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: ${{ env.JAVA_VERSION }}
+          cache: maven
+
+      - name: Run unit tests and generate JaCoCo report
+        run: mvn --batch-mode clean verify
+
+      - name: Upload Surefire test reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: unit-test-reports
+          path: target/surefire-reports/
+          if-no-files-found: warn
+
+      - name: Upload JaCoCo coverage report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: jacoco-coverage-report
+          path: target/site/jacoco/
+          if-no-files-found: warn
+
+  sonarqube:
+    name: SonarQube quality gate
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - name: Checkout source code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: ${{ env.JAVA_VERSION }}
+          cache: maven
+
+      - name: Run SonarQube analysis
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+        run: >
+          mvn --batch-mode verify sonar:sonar
+          -Dsonar.token=${SONAR_TOKEN}
+          -Dsonar.qualitygate.wait=true
+
+  package:
+    name: Build JAR artifact
+    runs-on: ubuntu-latest
+    needs: sonarqube
+    steps:
+      - name: Checkout source code
+        uses: actions/checkout@v4
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: ${{ env.JAVA_VERSION }}
+          cache: maven
+
+      - name: Package application
+        run: mvn --batch-mode clean package -DskipTests
+
+      - name: Upload JAR artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.APP_NAME }}-jar
+          path: target/*.jar
+
+  docker:
+    name: Build Docker image
+    runs-on: ubuntu-latest
+    needs: package
+    if: github.event_name != 'pull_request'
+    steps:
+      - name: Checkout source code
+        uses: actions/checkout@v4
+
+      - name: Download JAR artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ env.APP_NAME }}-jar
+          path: target
+
+      - name: Build Docker image
+        run: docker build -t ${{ env.APP_NAME }}:${{ github.sha }} .
+
+  deploy-staging:
+    name: Deploy to staging server
+    runs-on: ubuntu-latest
+    needs: docker
+    if: github.ref == 'refs/heads/main'
+    environment: staging
+    steps:
+      - name: Checkout source code
+        uses: actions/checkout@v4
+
+      - name: Download JAR artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ env.APP_NAME }}-jar
+          path: target
+
+      - name: Prepare SSH key
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.STAGING_SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          ssh-keyscan -H "${{ secrets.STAGING_HOST }}" >> ~/.ssh/known_hosts
+
+      - name: Copy and restart JAR service
+        run: |
+          JAR_FILE=$(ls target/*.jar | head -n 1)
+          scp "$JAR_FILE" "${{ secrets.STAGING_USER }}@${{ secrets.STAGING_HOST }}:/opt/${APP_NAME}/${APP_NAME}.jar"
+          ssh "${{ secrets.STAGING_USER }}@${{ secrets.STAGING_HOST }}" "sudo systemctl restart ${APP_NAME}"

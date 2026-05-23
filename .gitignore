@@ -1,0 +1,12 @@
+target/
+build/
+node_modules/
+coverage/
+.gradle/
+.idea/
+.vscode/
+*.log
+*.class
+*.jar
+*.war
+!.mvn/wrapper/maven-wrapper.jar
