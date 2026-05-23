@@ -18,8 +18,8 @@
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
         <jacoco.version>0.8.12</jacoco.version>
         <junit.version>5.11.3</junit.version>
-        <sonar.projectKey>your-org_cicd-pipeline-demo</sonar.projectKey>
-        <sonar.organization>your-org</sonar.organization>
+        <sonar.projectKey>harikap9_CICD-github-actions</sonar.projectKey>
+        <sonar.organization>harikap9</sonar.organization>
         <sonar.host.url>https://sonarcloud.io</sonar.host.url>
     </properties>
 
